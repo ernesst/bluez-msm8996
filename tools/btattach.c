@@ -214,9 +214,9 @@ static const struct {
 	{ "h4ds",  HCI_UART_H4DS  },
 	{ "ll",    HCI_UART_LL    },
 	{ "ath3k", HCI_UART_ATH3K },
-	{ "intel", HCI_UART_INTEL },
+	//{ "intel", HCI_UART_INTEL },
 	{ "bcm",   HCI_UART_BCM   },
-	{ "qca",   HCI_UART_QCA   },
+	{ "qca",   HCI_UART_IBS   },
 	{ }
 };
 

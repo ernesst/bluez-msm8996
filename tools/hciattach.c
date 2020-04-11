@@ -62,12 +62,16 @@ struct uart_t {
 	char *bdaddr;
 	int  (*init) (int fd, struct uart_t *u, struct termios *ti);
 	int  (*post) (int fd, struct uart_t *u, struct termios *ti);
+	int do_flush;
+	int low_power;
 };
 
 #define FLOW_CTL	0x0001
 #define AMP_DEV		0x0002
 #define ENABLE_PM	1
 #define DISABLE_PM	0
+
+int line_disp = 1;
 
 static volatile sig_atomic_t __io_canceled = 0;
 
@@ -107,16 +111,33 @@ int read_hci_event(int fd, unsigned char* buf, int size)
 {
 	int remain, r;
 	int count = 0;
+	fd_set infids;
+	struct timeval timeout;
 
 	if (size <= 0)
 		return -1;
+
+	FD_ZERO (&infids);
+	FD_SET (fd, &infids);
+	timeout.tv_sec = 3;
+	timeout.tv_usec = 0;
+
+	/* Check whether data is available in TTY buffer before calling read() */
+	if (select (fd + 1, &infids, NULL, NULL, &timeout) < 1) {
+		fprintf(stderr, "%s: Timing out on select for 3 secs.\n", __FUNCTION__);
+		return -1;
+	}	
+	else
+		fprintf(stderr, "%s: Data(HCI-CMD-COMP-EVENT) available in TTY Serial buffer\n", __FUNCTION__);
 
 	/* The first byte identifies the packet type. For HCI event packets, it
 	 * should be 0x04, so we read until we get to the 0x04. */
 	while (1) {
 		r = read(fd, buf, 1);
-		if (r <= 0)
+		if (r <= 0) {
+			fprintf(stderr, "%s: read() failed with return value: %d\n", __FUNCTION__, r);
 			return -1;
+		}
 		if (buf[0] == 0x04)
 			break;
 	}
@@ -261,6 +282,12 @@ static int ath3k_ps(int fd, struct uart_t *u, struct termios *ti)
 static int ath3k_pm(int fd, struct uart_t *u, struct termios *ti)
 {
 	return ath3k_post(fd, u->pm);
+}
+
+static int qca(int fd, struct uart_t *u, struct termios *ti)
+{
+	fprintf(stderr,"qca\n");
+	return qca_soc_init(fd, u->bdaddr);
 }
 
 static int qualcomm(int fd, struct uart_t *u, struct termios *ti)
@@ -1093,6 +1120,10 @@ struct uart_t uart[] = {
 	{ "ath3k",    0x0000, 0x0000, HCI_UART_ATH3K, 115200, 115200,
 			FLOW_CTL, DISABLE_PM, NULL, ath3k_ps, ath3k_pm  },
 
+	/* QCA ROME */
+	{ "qca",    0x0000, 0x0000, HCI_UART_IBS, 115200, 115200,
+			FLOW_CTL, DISABLE_PM, NULL, qca, NULL },
+
 	/* QUALCOMM BTS */
 	{ "qualcomm",   0x0000, 0x0000, HCI_UART_H4,   115200, 115200,
 			FLOW_CTL, DISABLE_PM, NULL, qualcomm, NULL },
@@ -1145,6 +1176,9 @@ static int init_uart(char *dev, struct uart_t *u, int send_break, int raw)
 	if (u->flags & AMP_DEV)
 		flags |= 1 << HCI_UART_CREATE_AMP;
 
+	if (!strncmp(u->type, "qca", 3))
+		flags |= 1 << HCI_UART_RESET_ON_INIT;
+
 	fd = open(dev, O_RDWR | O_NOCTTY);
 	if (fd < 0) {
 		perror("Can't open serial port");
@@ -1195,21 +1229,24 @@ static int init_uart(char *dev, struct uart_t *u, int send_break, int raw)
 		goto fail;
 	}
 
-	/* Set TTY to N_HCI line discipline */
-	i = N_HCI;
-	if (ioctl(fd, TIOCSETD, &i) < 0) {
-		perror("Can't set line discipline");
-		goto fail;
-	}
+	if (line_disp) {
+		/* Set TTY to N_HCI line discipline */
+		fprintf(stderr, "Setting TTY to N_HCI line discipline\n");
+		i = N_HCI;
+		if (ioctl(fd, TIOCSETD, &i) < 0) {
+			perror("Can't set line discipline");
+			goto fail;
+		}
 
-	if (flags && ioctl(fd, HCIUARTSETFLAGS, flags) < 0) {
-		perror("Can't set UART flags");
-		goto fail;
-	}
+		if (flags && ioctl(fd, HCIUARTSETFLAGS, flags) < 0) {
+			perror("Can't set UART flags");
+			goto fail;
+		}
 
-	if (ioctl(fd, HCIUARTSETPROTO, u->proto) < 0) {
-		perror("Can't set device");
-		goto fail;
+		if (ioctl(fd, HCIUARTSETPROTO, u->proto) < 0) {
+			perror("Can't set device");
+			goto fail;
+		}
 	}
 
 	if (u->post && u->post(fd, u, &ti) < 0)
@@ -1249,11 +1286,16 @@ int main(int argc, char *argv[])
 	printpid = 0;
 	raw = 0;
 
-	while ((opt=getopt(argc, argv, "bnpt:s:lr")) != EOF) {
+	while ((opt=getopt(argc, argv, "bnpt:s:lrdmf:")) != EOF) {	
 		switch(opt) {
 		case 'b':
 			send_break = 1;
 			break;
+
+		case 'f':
+			line_disp = atoi(optarg);
+			fprintf(stderr, "Line_disp val : %d\n", line_disp);
+			break;	
 
 		case 'n':
 			detach = 0;
@@ -1426,12 +1468,15 @@ int main(int argc, char *argv[])
 			break;
 	}
 
-	/* Restore TTY line discipline */
-	ld = N_TTY;
-	if (ioctl(n, TIOCSETD, &ld) < 0) {
-		perror("Can't restore line discipline");
-		exit(1);
-	}
+  if(line_disp){
+    fprintf(stderr, "Restoring the Line Discipline driver\n");
+	  /* Restore TTY line discipline */
+	  ld = N_TTY;
+	  if (ioctl(n, TIOCSETD, &ld) < 0) {
+		  perror("Can't restore line discipline");
+		  exit(1);
+	  }
+  }
 
 	return 0;
 }
